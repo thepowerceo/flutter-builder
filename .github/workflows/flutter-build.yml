@@ -7,49 +7,106 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
     steps:
       - name: Download source
+        shell: bash
         run: |
+          set -euo pipefail
+
           SOURCE_URL="${{ github.event.client_payload.source_url }}"
           if [ -n "$SOURCE_URL" ]; then
-            ZIP_URL=$(echo "$SOURCE_URL" | sed 's|github.com/|github.com/|;s|$|/archive/refs/heads/main.zip|')
+            ZIP_URL="${SOURCE_URL}/archive/refs/heads/main.zip"
             curl -L -o source.zip "$ZIP_URL" || curl -L -o source.zip "${SOURCE_URL}/archive/refs/heads/master.zip"
             unzip source.zip
             shopt -s dotglob && mv *-main/* . 2>/dev/null || mv *-master/* . 2>/dev/null || true
           fi
 
-      - uses: subosito/flutter-action@v2
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.24.0'
           channel: 'stable'
 
       - name: Enable Web Support
+        shell: bash
         run: |
+          set -euo pipefail
+
           if [ ! -f "web/index.html" ]; then
-            APP_NAME=$(grep '^name:' pubspec.yaml | sed 's/name: //' | tr -d '[:space:]' | tr '-' '_')
+            APP_NAME=$(python3 - <<'PY'
+import re
+name = 'app'
+try:
+  with open('pubspec.yaml','r',encoding='utf-8') as f:
+    for line in f:
+      m = re.match(r'^name\s*:\s*([^\s#]+)', line)
+      if m:
+        name = m.group(1)
+        break
+except FileNotFoundError:
+  pass
+name = re.sub(r'[^a-zA-Z0-9_]', '_', name)
+if not re.match(r'^[a-zA-Z_]', name):
+  name = '_' + name
+print(name)
+PY
+            )
             flutter create . --platforms=web --project-name="$APP_NAME"
           fi
 
       - name: Build Flutter Web
+        shell: bash
         run: |
+          set -euo pipefail
+
           flutter pub get
-          flutter build web --release --base-href "./"
+
+          BASE_HREF="${{ github.event.client_payload.base_href }}"
+          if [ -z "$BASE_HREF" ]; then
+            BASE_HREF="${{ github.event.client_payload.baseHref }}"
+          fi
+          if [ -z "$BASE_HREF" ]; then
+            PROJECT_ID="${{ github.event.client_payload.project_id }}"
+            if [ -n "$PROJECT_ID" ]; then
+              BASE_HREF="/storage/v1/object/public/flutter-compiled/${PROJECT_ID}/"
+            else
+              echo "ERROR: No base_href and no project_id in payload" >&2
+              exit 1
+            fi
+          fi
+
+          if [[ "$BASE_HREF" != /*/ ]]; then
+            echo "Invalid BASE_HREF='$BASE_HREF' (must start and end with '/')" >&2
+            exit 1
+          fi
+
+          echo "Building with BASE_HREF=$BASE_HREF"
+          flutter build web --release --base-href "$BASE_HREF"
 
       - name: Report Success
         if: success()
+        shell: bash
         run: |
+          set -euo pipefail
+
           cd build/web
           zip -r ../../build.zip .
           cd ../..
-          curl -X POST "${{ github.event.client_payload.callback_url }}" \
+
+          curl -sS -X POST "${{ github.event.client_payload.callback_url }}" \
             -F "project_id=${{ github.event.client_payload.project_id }}" \
             -F "status=completed" \
             -F "file=@build.zip"
 
       - name: Report Failure
         if: failure()
+        shell: bash
         run: |
-          curl -X POST "${{ github.event.client_payload.callback_url }}" \
+          set -euo pipefail
+
+          curl -sS -X POST "${{ github.event.client_payload.callback_url }}" \
             -F "project_id=${{ github.event.client_payload.project_id }}" \
             -F "status=failed" \
-            -F "error_message=Build failed"
+            -F "error_message=GitHub Actions build failed" || true
