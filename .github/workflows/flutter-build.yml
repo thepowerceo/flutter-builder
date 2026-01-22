@@ -9,121 +9,93 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Flutter
+      - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Disable Flutter analytics
-        run: flutter config --no-analytics
-
-      - name: Download source
+      - name: Download and extract source
         run: |
-          echo "=== Build payload ==="
-          echo "Project ID: ${{ github.event.client_payload.project_id }}"
-          echo "Source type: ${{ github.event.client_payload.source_type }}"
-          echo "Source URL: ${{ github.event.client_payload.source_url }}"
+          SOURCE_URL="${{ github.event.client_payload.source_url }}"
           
-          if [ "${{ github.event.client_payload.source_type }}" == "github" ]; then
-            REPO_URL="${{ github.event.client_payload.source_url }}"
-            REPO_URL="${REPO_URL%/}"
-            
-            # Convert repo URL to archive URL if needed
-            if [[ "$REPO_URL" == *"/archive/"* ]]; then
-              ARCHIVE_URL="$REPO_URL"
-            else
-              ARCHIVE_URL="${REPO_URL}/archive/refs/heads/main.zip"
-            fi
-            
-            echo "Trying archive URL: $ARCHIVE_URL"
-            HTTP_CODE=$(curl -L -o source.zip -w "%{http_code}" "$ARCHIVE_URL")
-            
-            if [ "$HTTP_CODE" != "200" ]; then
-              echo "main branch not found (HTTP $HTTP_CODE), trying master..."
-              ARCHIVE_URL="${REPO_URL}/archive/refs/heads/master.zip"
-              curl -L -o source.zip "$ARCHIVE_URL" --fail
-            fi
-          else
-            curl -L -o source.zip "${{ github.event.client_payload.source_url }}" --fail
+          # Convert GitHub repo URL to ZIP download URL if needed
+          if [[ "$SOURCE_URL" == https://github.com/* && ! "$SOURCE_URL" == *.zip ]]; then
+            REPO_PATH="${SOURCE_URL#https://github.com/}"
+            SOURCE_URL="https://github.com/${REPO_PATH}/archive/refs/heads/main.zip"
           fi
           
-          ls -la source.zip
-          unzip -q source.zip
+          curl -L -o source.zip "$SOURCE_URL"
+          unzip source.zip -d source_temp
           
-          # Flatten directory structure
+          # Flatten: move contents up if there's a single wrapper directory
           shopt -s dotglob
-          EXTRACTED_DIR=$(find . -maxdepth 1 -type d -name "*-main" -o -name "*-master" | head -1)
-          if [ -n "$EXTRACTED_DIR" ] && [ "$EXTRACTED_DIR" != "." ]; then
-            echo "Flattening directory: $EXTRACTED_DIR"
-            mv "$EXTRACTED_DIR"/* .
-            rmdir "$EXTRACTED_DIR"
+          if [ $(ls -1 source_temp | wc -l) -eq 1 ] && [ -d "source_temp/$(ls source_temp)" ]; then
+            mv source_temp/*/* ./flutter_project/ 2>/dev/null || mv source_temp/*/.* ./flutter_project/ 2>/dev/null || true
+            mkdir -p flutter_project
+            mv source_temp/*/* flutter_project/ 2>/dev/null || true
+          else
+            mv source_temp flutter_project
           fi
           
-          echo "=== Project structure ==="
-          ls -la
-          
-          if [ ! -f "pubspec.yaml" ]; then
-            echo "ERROR: pubspec.yaml not found!"
-            exit 1
-          fi
+          rm -rf source_temp source.zip
 
-      - name: Ensure web platform exists
+      - name: Generate web support if missing
+        working-directory: flutter_project
         run: |
           if [ ! -f "web/index.html" ]; then
-            echo "Creating web scaffolding..."
-            
-            # Extract app name from pubspec.yaml
-            APP_NAME=$(grep -m1 '^name:' pubspec.yaml | awk '{print $2}' | tr -d '\r')
-            echo "Extracted app name: $APP_NAME"
-            
-            if [ -z "$APP_NAME" ]; then
-              echo "Could not extract app name, using default"
-              APP_NAME="flutter_app"
-            fi
-            
-            # Create web platform with correct project name
-            flutter create . --platforms=web --project-name="$APP_NAME"
-          else
-            echo "Web platform already exists"
+            # Extract package name from pubspec.yaml
+            PACKAGE_NAME=$(grep "^name:" pubspec.yaml | sed 's/name: *//' | tr -d '\r\n' | xargs)
+            flutter create --platforms=web --project-name="$PACKAGE_NAME" .
           fi
 
-      - name: Get dependencies
+      - name: Install dependencies
+        working-directory: flutter_project
         run: flutter pub get
 
-      - name: Build web
-        run: flutter build web --release --base-href "/"
+      - name: Build for web
+        working-directory: flutter_project
+        run: flutter build web --release --base-href "/${{ github.event.client_payload.project_id }}/"
 
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: flutter-web-build
-          path: build/web/
-          retention-days: 7
-
-      - name: Notify success
-        if: success()
+      - name: Upload to Supabase Storage
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          PROJECT_ID: ${{ github.event.client_payload.project_id }}
         run: |
-          curl -X POST "${{ secrets.SUPABASE_URL }}/functions/v1/build-callback" \
-            -H "Content-Type: application/json" \
-            -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
-            -d '{
-              "project_id": "${{ github.event.client_payload.project_id }}",
-              "status": "completed",
-              "compiled_url": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-            }'
+          cd flutter_project/build/web
+          
+          # Upload each file to Supabase Storage
+          find . -type f | while read file; do
+            relative_path="${file#./}"
+            mime_type=$(file -b --mime-type "$file")
+            
+            echo "Uploading: $relative_path ($mime_type)"
+            
+            curl -X POST "${SUPABASE_URL}/storage/v1/object/flutter-compiled/${PROJECT_ID}/${relative_path}" \
+              -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
+              -H "Content-Type: ${mime_type}" \
+              --data-binary @"$file" \
+              --fail --silent --show-error
+          done
+          
+          echo "All files uploaded successfully"
 
-      - name: Notify failure
+      - name: Notify build success
+        if: success()
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          PROJECT_ID: ${{ github.event.client_payload.project_id }}
+        run: |
+          COMPILED_URL="${SUPABASE_URL}/storage/v1/object/public/flutter-compiled/${PROJECT_ID}/index.html"
+          
+          curl -X POST "${{ github.event.client_payload.callback_url }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"project_id\": \"${PROJECT_ID}\", \"status\": \"completed\", \"compiled_url\": \"${COMPILED_URL}\"}"
+
+      - name: Notify build failure
         if: failure()
         run: |
-          curl -X POST "${{ secrets.SUPABASE_URL }}/functions/v1/build-callback" \
+          curl -X POST "${{ github.event.client_payload.callback_url }}" \
             -H "Content-Type: application/json" \
-            -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
-            -d '{
-              "project_id": "${{ github.event.client_payload.project_id }}",
-              "status": "failed",
-              "error_message": "Build failed - check workflow logs"
-            }'
+            -d "{\"project_id\": \"${{ github.event.client_payload.project_id }}\", \"status\": \"failed\", \"error_message\": \"Build failed - check GitHub Actions logs\"}"
