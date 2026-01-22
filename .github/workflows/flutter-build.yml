@@ -16,18 +16,22 @@ jobs:
           set -euo pipefail
 
           SOURCE_URL="${{ github.event.client_payload.source_url }}"
-          if [ -n "$SOURCE_URL" ]; then
-            ZIP_URL="${SOURCE_URL}/archive/refs/heads/main.zip"
-            curl -L -o source.zip "$ZIP_URL" || curl -L -o source.zip "${SOURCE_URL}/archive/refs/heads/master.zip"
-            unzip source.zip
-            shopt -s dotglob && mv *-main/* . 2>/dev/null || mv *-master/* . 2>/dev/null || true
+          if [ -n "${SOURCE_URL:-}" ]; then
+            curl -L -o source.zip "${SOURCE_URL}/archive/refs/heads/main.zip" || \
+              curl -L -o source.zip "${SOURCE_URL}/archive/refs/heads/master.zip"
+
+            unzip -q source.zip
+
+            # Move extracted repo contents into workspace root
+            shopt -s dotglob
+            mv *-main/* . 2>/dev/null || mv *-master/* . 2>/dev/null || true
           fi
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.0'
-          channel: 'stable'
+          flutter-version: "3.24.0"
+          channel: "stable"
 
       - name: Enable Web Support
         shell: bash
@@ -35,24 +39,11 @@ jobs:
           set -euo pipefail
 
           if [ ! -f "web/index.html" ]; then
-            APP_NAME=$(python3 - <<'PY'
-import re
-name = 'app'
-try:
-  with open('pubspec.yaml','r',encoding='utf-8') as f:
-    for line in f:
-      m = re.match(r'^name\s*:\s*([^\s#]+)', line)
-      if m:
-        name = m.group(1)
-        break
-except FileNotFoundError:
-  pass
-name = re.sub(r'[^a-zA-Z0-9_]', '_', name)
-if not re.match(r'^[a-zA-Z_]', name):
-  name = '_' + name
-print(name)
-PY
-            )
+            APP_NAME="$(awk -F: '/^name[[:space:]]*:/ {gsub(/[[:space:]]/, "", $2); print $2; exit}' pubspec.yaml 2>/dev/null || true)"
+            APP_NAME="${APP_NAME:-app}"
+            APP_NAME="$(echo "$APP_NAME" | tr '-' '_' | tr -cd 'a-zA-Z0-9_')"
+            if [[ ! "$APP_NAME" =~ ^[A-Za-z_] ]]; then APP_NAME="_${APP_NAME}"; fi
+
             flutter create . --platforms=web --project-name="$APP_NAME"
           fi
 
@@ -64,17 +55,11 @@ PY
           flutter pub get
 
           BASE_HREF="${{ github.event.client_payload.base_href }}"
-          if [ -z "$BASE_HREF" ]; then
+          if [ -z "${BASE_HREF:-}" ]; then
             BASE_HREF="${{ github.event.client_payload.baseHref }}"
           fi
-          if [ -z "$BASE_HREF" ]; then
-            PROJECT_ID="${{ github.event.client_payload.project_id }}"
-            if [ -n "$PROJECT_ID" ]; then
-              BASE_HREF="/storage/v1/object/public/flutter-compiled/${PROJECT_ID}/"
-            else
-              echo "ERROR: No base_href and no project_id in payload" >&2
-              exit 1
-            fi
+          if [ -z "${BASE_HREF:-}" ]; then
+            BASE_HREF="/storage/v1/object/public/flutter-compiled/${{ github.event.client_payload.project_id }}/"
           fi
 
           if [[ "$BASE_HREF" != /*/ ]]; then
