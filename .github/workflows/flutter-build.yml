@@ -9,106 +9,110 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Setup Flutter
-      uses: subosito/flutter-action@v2
-      with:
-        flutter-version: '3.24.0'
-        channel: 'stable'
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Download source
-      if: github.event.client_payload.source_type == 'github'
-      run: |
-        REPO_URL="${{ github.event.client_payload.source_url }}"
-        ARCHIVE_URL="${REPO_URL}/archive/refs/heads/main.zip"
-        echo "=== Downloading from: $ARCHIVE_URL ==="
-        curl -L -o source.zip "$ARCHIVE_URL"
-        echo "=== Unzipping ==="
-        unzip -q source.zip
-        echo "=== Directory contents after unzip ==="
-        ls -la
-        echo "=== Finding extracted directory ==="
-        EXTRACTED_DIR=$(find . -maxdepth 1 -type d ! -name "." | head -1)
-        echo "Found directory: $EXTRACTED_DIR"
-        if [ -n "$EXTRACTED_DIR" ] && [ -d "$EXTRACTED_DIR" ]; then
-          echo "=== Contents of extracted directory ==="
-          ls -la "$EXTRACTED_DIR"
-          echo "=== Moving contents to current directory ==="
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'
+          channel: 'stable'
+
+      - name: Download and extract source
+        shell: bash
+        run: |
+          echo "=== Build payload ==="
+          echo "Project ID: ${{ github.event.client_payload.project_id }}"
+          echo "Source type: ${{ github.event.client_payload.source_type }}"
+          echo "Source URL: ${{ github.event.client_payload.source_url }}"
+          
+          if [ "${{ github.event.client_payload.source_type }}" == "github" ]; then
+            curl -L -o source.zip "${{ github.event.client_payload.source_url }}"
+          else
+            curl -L -o source.zip "${{ github.event.client_payload.storage_url }}"
+          fi
+          
+          unzip -q source.zip
+          
+          # Flatten if extracted into subdirectory
           shopt -s dotglob
-          mv "$EXTRACTED_DIR"/* . 2>/dev/null || true
-          rm -rf "$EXTRACTED_DIR"
-        fi
-        echo "=== Final directory contents ==="
-        ls -la
-        echo "=== Looking for pubspec.yaml ==="
-        find . -name "pubspec.yaml" -type f
+          EXTRACTED_DIR=$(find . -maxdepth 1 -type d ! -name "." ! -name ".git" | head -1)
+          if [ -n "$EXTRACTED_DIR" ] && [ -d "$EXTRACTED_DIR" ] && [ -f "$EXTRACTED_DIR/pubspec.yaml" ]; then
+            echo "Moving contents from $EXTRACTED_DIR to root"
+            mv "$EXTRACTED_DIR"/* . 2>/dev/null || true
+            rm -rf "$EXTRACTED_DIR"
+          fi
+          
+          echo "=== Directory contents ==="
+          ls -la
 
-    - name: Download from storage
-      if: github.event.client_payload.source_type == 'zip'
-      run: |
-        echo "=== Downloading from storage ==="
-        curl -L -o source.zip "${{ github.event.client_payload.storage_url }}"
-        unzip -q source.zip
-        echo "=== Directory contents after unzip ==="
-        ls -la
-        EXTRACTED_DIR=$(find . -maxdepth 1 -type d ! -name "." | head -1)
-        echo "Found directory: $EXTRACTED_DIR"
-        if [ -n "$EXTRACTED_DIR" ] && [ -d "$EXTRACTED_DIR" ]; then
-          echo "=== Contents of extracted directory ==="
-          ls -la "$EXTRACTED_DIR"
-          shopt -s dotglob
-          mv "$EXTRACTED_DIR"/* . 2>/dev/null || true
-          rm -rf "$EXTRACTED_DIR"
-        fi
-        echo "=== Final directory contents ==="
-        ls -la
-        echo "=== Looking for pubspec.yaml ==="
-        find . -name "pubspec.yaml" -type f
-
-    - name: Build web
-      run: |
-        echo "=== Current directory ==="
-        pwd
-        echo "=== Directory contents ==="
-        ls -la
-        echo "=== Checking for pubspec.yaml ==="
-        if [ -f "pubspec.yaml" ]; then
-          echo "pubspec.yaml found!"
+      - name: Verify Flutter project
+        shell: bash
+        run: |
+          if [ ! -f "pubspec.yaml" ]; then
+            echo "ERROR: pubspec.yaml not found!"
+            find . -name "pubspec.yaml" -type f
+            exit 1
+          fi
+          echo "pubspec.yaml found"
           cat pubspec.yaml | head -20
-        else
-          echo "ERROR: pubspec.yaml not found!"
-          echo "Searching for it..."
-          find . -name "pubspec.yaml" -type f
-          exit 1
-        fi
-        flutter config --no-analytics
-        flutter pub get
-        echo "=== Building web ==="
-        flutter build web --release --verbose
-        echo "=== Build output ==="
-        ls -la build/web || echo "build/web directory not found!"
 
-    - name: Zip build output
-      run: |
-        cd build/web
-        zip -r ../../flutter-web-build.zip .
+      - name: Ensure web platform exists
+        shell: bash
+        run: |
+          if [ -f "web/index.html" ]; then
+            echo "web/index.html found"
+          else
+            echo "web/index.html MISSING -> creating web scaffolding..."
+            flutter create . --platforms=web
+          fi
+          echo "=== web/ contents ==="
+          ls -la web
 
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: flutter-web-build
-        path: flutter-web-build.zip
+      - name: Build Flutter web
+        run: |
+          flutter config --no-analytics
+          flutter pub get
+          flutter build web --release
+          echo "=== Build output ==="
+          ls -la build/web
 
-    - name: Notify callback
-      if: always()
-      run: |
-        if [ "${{ job.status }}" == "success" ]; then
-          STATUS="completed"
-          ARTIFACT_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+      - name: Upload to Supabase Storage
+        shell: bash
+        run: |
+          cd build/web
+          zip -r ../../compiled.zip .
+          cd ../..
+          
+          COMPILED_URL=$(curl -X POST \
+            "${{ secrets.SUPABASE_URL }}/storage/v1/object/flutter-compiled/${{ github.event.client_payload.project_id }}/app.zip" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "Content-Type: application/zip" \
+            --data-binary @compiled.zip \
+            --fail \
+            -w "\n%{http_code}" | tail -1)
+          
+          echo "Upload response code: $COMPILED_URL"
+          echo "COMPILED_URL=${{ secrets.SUPABASE_URL }}/storage/v1/object/public/flutter-compiled/${{ github.event.client_payload.project_id }}/app.zip" >> $GITHUB_ENV
+
+      - name: Notify completion
+        if: success()
+        run: |
           curl -X POST "${{ github.event.client_payload.callback_url }}" \
             -H "Content-Type: application/json" \
-            -d '{"project_id":"${{ github.event.client_payload.project_id }}","status":"'"$STATUS"'","compiled_url":"'"$ARTIFACT_URL"'"}'
-        else
+            -d '{
+              "project_id": "${{ github.event.client_payload.project_id }}",
+              "status": "completed",
+              "compiled_url": "${{ env.COMPILED_URL }}"
+            }'
+
+      - name: Notify failure
+        if: failure()
+        run: |
           curl -X POST "${{ github.event.client_payload.callback_url }}" \
             -H "Content-Type: application/json" \
-            -d '{"project_id":"${{ github.event.client_payload.project_id }}","status":"failed","error_message":"Build failed"}'
-        fi
+            -d '{
+              "project_id": "${{ github.event.client_payload.project_id }}",
+              "status": "failed",
+              "error_message": "Build failed - check GitHub Actions logs"
+            }'
