@@ -20,31 +20,72 @@ jobs:
       run: |
         REPO_URL="${{ github.event.client_payload.source_url }}"
         ARCHIVE_URL="${REPO_URL}/archive/refs/heads/main.zip"
-        echo "Downloading from: $ARCHIVE_URL"
+        echo "=== Downloading from: $ARCHIVE_URL ==="
         curl -L -o source.zip "$ARCHIVE_URL"
+        echo "=== Unzipping ==="
         unzip -q source.zip
-        EXTRACTED_DIR=$(find . -maxdepth 1 -type d -name "*-main" -o -name "*-master" | head -1)
-        if [ -n "$EXTRACTED_DIR" ]; then
-          mv "$EXTRACTED_DIR"/* .
+        echo "=== Directory contents after unzip ==="
+        ls -la
+        echo "=== Finding extracted directory ==="
+        EXTRACTED_DIR=$(find . -maxdepth 1 -type d ! -name "." | head -1)
+        echo "Found directory: $EXTRACTED_DIR"
+        if [ -n "$EXTRACTED_DIR" ] && [ -d "$EXTRACTED_DIR" ]; then
+          echo "=== Contents of extracted directory ==="
+          ls -la "$EXTRACTED_DIR"
+          echo "=== Moving contents to current directory ==="
+          shopt -s dotglob
+          mv "$EXTRACTED_DIR"/* . 2>/dev/null || true
           rm -rf "$EXTRACTED_DIR"
         fi
+        echo "=== Final directory contents ==="
+        ls -la
+        echo "=== Looking for pubspec.yaml ==="
+        find . -name "pubspec.yaml" -type f
 
     - name: Download from storage
       if: github.event.client_payload.source_type == 'zip'
       run: |
+        echo "=== Downloading from storage ==="
         curl -L -o source.zip "${{ github.event.client_payload.storage_url }}"
         unzip -q source.zip
+        echo "=== Directory contents after unzip ==="
+        ls -la
         EXTRACTED_DIR=$(find . -maxdepth 1 -type d ! -name "." | head -1)
-        if [ -n "$EXTRACTED_DIR" ]; then
-          mv "$EXTRACTED_DIR"/* .
+        echo "Found directory: $EXTRACTED_DIR"
+        if [ -n "$EXTRACTED_DIR" ] && [ -d "$EXTRACTED_DIR" ]; then
+          echo "=== Contents of extracted directory ==="
+          ls -la "$EXTRACTED_DIR"
+          shopt -s dotglob
+          mv "$EXTRACTED_DIR"/* . 2>/dev/null || true
           rm -rf "$EXTRACTED_DIR"
         fi
+        echo "=== Final directory contents ==="
+        ls -la
+        echo "=== Looking for pubspec.yaml ==="
+        find . -name "pubspec.yaml" -type f
 
     - name: Build web
       run: |
+        echo "=== Current directory ==="
+        pwd
+        echo "=== Directory contents ==="
+        ls -la
+        echo "=== Checking for pubspec.yaml ==="
+        if [ -f "pubspec.yaml" ]; then
+          echo "pubspec.yaml found!"
+          cat pubspec.yaml | head -20
+        else
+          echo "ERROR: pubspec.yaml not found!"
+          echo "Searching for it..."
+          find . -name "pubspec.yaml" -type f
+          exit 1
+        fi
         flutter config --no-analytics
         flutter pub get
-        flutter build web --release
+        echo "=== Building web ==="
+        flutter build web --release --verbose
+        echo "=== Build output ==="
+        ls -la build/web || echo "build/web directory not found!"
 
     - name: Zip build output
       run: |
