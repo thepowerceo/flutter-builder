@@ -1,4 +1,3 @@
-# .github/workflows/flutter-build.yml
 name: Flutter Web Build
 
 on:
@@ -8,86 +7,43 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    
     steps:
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
+      - name: Download source
+        run: |
+          SOURCE_URL="${{ github.event.client_payload.source_url }}"
+          if [ -n "$SOURCE_URL" ]; then
+            # Convert GitHub repo URL to ZIP download
+            ZIP_URL=$(echo "$SOURCE_URL" | sed 's|github.com/|github.com/|;s|$|/archive/refs/heads/main.zip|')
+            curl -L -o source.zip "$ZIP_URL" || curl -L -o source.zip "${SOURCE_URL}/archive/refs/heads/master.zip"
+            unzip source.zip
+            shopt -s dotglob && mv *-main/* . 2>/dev/null || mv *-master/* . 2>/dev/null || true
+          fi
+
+      - uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Get build parameters
-        id: params
-        run: |
-          echo "project_id=${{ github.event.client_payload.project_id }}" >> $GITHUB_OUTPUT
-          echo "source_url=${{ github.event.client_payload.source_url }}" >> $GITHUB_OUTPUT
-          echo "callback_url=${{ github.event.client_payload.callback_url }}" >> $GITHUB_OUTPUT
-
-      - name: Download and extract source
-        run: |
-          SOURCE_URL="${{ steps.params.outputs.source_url }}"
-          
-          # Convert GitHub repo URL to ZIP if needed
-          if [[ "$SOURCE_URL" =~ github\.com/([^/]+)/([^/]+)$ ]]; then
-            OWNER="${BASH_REMATCH[1]}"
-            REPO="${BASH_REMATCH[2]%.git}"
-            SOURCE_URL="https://github.com/$OWNER/$REPO/archive/refs/heads/main.zip"
-          fi
-          
-          curl -L -o source.zip "$SOURCE_URL"
-          unzip source.zip -d extracted
-          
-          # Flatten if needed
-          shopt -s dotglob
-          if [ $(ls -1 extracted | wc -l) -eq 1 ] && [ -d "extracted/$(ls extracted)" ]; then
-            mv extracted/*/* extracted/ 2>/dev/null || true
-            rmdir extracted/*/ 2>/dev/null || true
-          fi
-          
-          mv extracted flutter_project
-
-      - name: Setup web support
-        working-directory: flutter_project
-        run: |
-          if [ ! -f "web/index.html" ]; then
-            PACKAGE_NAME=$(grep "^name:" pubspec.yaml | sed 's/name: *//')
-            flutter create --template=app --platforms=web --project-name="$PACKAGE_NAME" .
-          fi
-
       - name: Build Flutter Web
-        working-directory: flutter_project
         run: |
           flutter pub get
-          flutter build web --release --base-href "/${{ steps.params.outputs.project_id }}/"
+          flutter build web --release --base-href "/"
 
-      - name: Upload to Lovable Cloud
+      - name: Report Success
+        if: success()
         run: |
-          PROJECT_ID="${{ steps.params.outputs.project_id }}"
-          CALLBACK_URL="${{ steps.params.outputs.callback_url }}"
-          
-          cd flutter_project/build/web
-          
-          # Create multipart form with all files
-          CURL_ARGS=(-X POST "$CALLBACK_URL")
-          CURL_ARGS+=(-F "project_id=$PROJECT_ID")
-          CURL_ARGS+=(-F "status=completed")
-          
-          # Add all files
-          find . -type f | while read file; do
-            FILENAME="${file#./}"
-            CURL_ARGS+=(-F "file_$FILENAME=@$file;filename=$FILENAME")
-          done
-          
-          # Execute upload
-          find . -type f -exec echo "Uploading: {}" \;
-          
-          curl "${CURL_ARGS[@]}" \
-            -H "Content-Type: multipart/form-data"
+          cd build/web
+          zip -r ../../build.zip .
+          cd ../..
+          curl -X POST "${{ github.event.client_payload.callback_url }}" \
+            -F "project_id=${{ github.event.client_payload.project_id }}" \
+            -F "status=completed" \
+            -F "file=@build.zip"
 
-      - name: Report failure
+      - name: Report Failure
         if: failure()
         run: |
-          curl -X POST "${{ steps.params.outputs.callback_url }}" \
-            -F "project_id=${{ steps.params.outputs.project_id }}" \
+          curl -X POST "${{ github.event.client_payload.callback_url }}" \
+            -F "project_id=${{ github.event.client_payload.project_id }}" \
             -F "status=failed" \
-            -F "error_message=Build failed in GitHub Actions"
+            -F "error_message=Build failed"
