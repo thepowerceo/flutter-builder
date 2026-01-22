@@ -1,0 +1,49 @@
+name: Flutter Web Build
+
+on:
+  repository_dispatch:
+    types: [flutter-build]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download source
+        run: |
+          curl -L "${{ github.event.client_payload.source_url }}" -o source.zip
+          unzip source.zip -d flutter_app
+          cd flutter_app && ls -la
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'
+          channel: 'stable'
+
+      - name: Build web
+        run: |
+          cd flutter_app/*  # Enter the extracted folder
+          flutter pub get
+          flutter build web --release
+
+      - name: Upload to Supabase Storage
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          # Zip the build output
+          cd flutter_app/*/build/web
+          zip -r build.zip .
+          
+          # Upload to Supabase storage
+          curl -X POST "$SUPABASE_URL/storage/v1/object/compiled/${{ github.event.client_payload.project_id }}/web.zip" \
+            -H "Authorization: Bearer $SUPABASE_KEY" \
+            -H "Content-Type: application/zip" \
+            --data-binary @build.zip
+
+      - name: Notify callback
+        if: always()
+        run: |
+          STATUS="${{ job.status }}"
+          curl -X POST "${{ github.event.client_payload.callback_url }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"project_id\":\"${{ github.event.client_payload.project_id }}\",\"status\":\"$STATUS\",\"compiled_url\":\"${{ secrets.SUPABASE_URL }}/storage/v1/object/public/compiled/${{ github.event.client_payload.project_id }}/web.zip\"}"
