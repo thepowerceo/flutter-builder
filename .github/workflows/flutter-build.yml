@@ -2,7 +2,7 @@ name: Flutter Web Build
 
 on:
   repository_dispatch:
-    types: [flutter-build]
+    types: [flutter_build]
 
 jobs:
   build:
@@ -32,12 +32,16 @@ jobs:
           path: build.zip
           retention-days: 1
 
-      - name: Notify callback with artifact URL
+      - name: Notify callback
         if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          ARTIFACT_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          curl -X POST "${{ github.event.client_payload.callback_url }}" \
-            -H "Content-Type: application/json" \
-            -d '{"project_id":"${{ github.event.client_payload.project_id }}","status":"${{ job.status }}","artifact_url":"'"$ARTIFACT_URL"'"}'
+          if [ "${{ job.status }}" == "success" ]; then
+            ARTIFACT_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            curl -X POST "${{ github.event.client_payload.callback_url }}" \
+              -H "Content-Type: application/json" \
+              -d '{"project_id":"${{ github.event.client_payload.project_id }}","status":"completed","compiled_url":"'"$ARTIFACT_URL"'"}'
+          else
+            curl -X POST "${{ github.event.client_payload.callback_url }}" \
+              -H "Content-Type: application/json" \
+              -d '{"project_id":"${{ github.event.client_payload.project_id }}","status":"failed","error_message":"Build failed - check GitHub Actions logs"}'
+          fi
