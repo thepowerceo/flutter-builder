@@ -10,8 +10,12 @@ jobs:
     steps:
       - name: Download source
         run: |
-          curl -L "${{ github.event.client_payload.source_url }}" -o source.zip
+          REPO_URL="${{ github.event.client_payload.source_url }}"
+          ARCHIVE_URL="${REPO_URL}/archive/refs/heads/main.zip"
+          echo "Downloading from: $ARCHIVE_URL"
+          curl -L "$ARCHIVE_URL" -o source.zip
           unzip source.zip -d flutter_app
+          ls -la flutter_app/
 
       - uses: subosito/flutter-action@v2
         with:
