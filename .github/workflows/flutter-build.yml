@@ -27,10 +27,32 @@ jobs:
           echo "Source URL: ${{ github.event.client_payload.source_url }}"
           
           if [ "${{ github.event.client_payload.source_type }}" == "github" ]; then
-            curl -L -o source.zip "${{ github.event.client_payload.source_url }}"
+            # Convert repo URL to archive URL
+            REPO_URL="${{ github.event.client_payload.source_url }}"
+            # Remove trailing slash if present
+            REPO_URL="${REPO_URL%/}"
+            # Try to detect if it's already an archive URL
+            if [[ "$REPO_URL" == *"/archive/"* ]]; then
+              ARCHIVE_URL="$REPO_URL"
+            else
+              # Default to main branch, fallback to master
+              ARCHIVE_URL="${REPO_URL}/archive/refs/heads/main.zip"
+            fi
+            echo "Archive URL: $ARCHIVE_URL"
+            
+            HTTP_CODE=$(curl -L -o source.zip -w "%{http_code}" "$ARCHIVE_URL")
+            if [ "$HTTP_CODE" != "200" ]; then
+              echo "main branch failed, trying master..."
+              ARCHIVE_URL="${REPO_URL}/archive/refs/heads/master.zip"
+              curl -L -o source.zip "$ARCHIVE_URL" --fail
+            fi
           else
-            curl -L -o source.zip "${{ github.event.client_payload.storage_url }}"
+            curl -L -o source.zip "${{ github.event.client_payload.storage_url }}" --fail
           fi
+          
+          echo "=== Downloaded file info ==="
+          file source.zip
+          ls -la source.zip
           
           unzip -q source.zip
           
@@ -55,7 +77,6 @@ jobs:
             exit 1
           fi
           echo "pubspec.yaml found"
-          cat pubspec.yaml | head -20
 
       - name: Ensure web platform exists
         shell: bash
@@ -63,19 +84,15 @@ jobs:
           if [ -f "web/index.html" ]; then
             echo "web/index.html found"
           else
-            echo "web/index.html MISSING -> creating web scaffolding..."
+            echo "Creating web scaffolding..."
             flutter create . --platforms=web
           fi
-          echo "=== web/ contents ==="
-          ls -la web
 
       - name: Build Flutter web
         run: |
           flutter config --no-analytics
           flutter pub get
           flutter build web --release
-          echo "=== Build output ==="
-          ls -la build/web
 
       - name: Upload to Supabase Storage
         shell: bash
@@ -84,15 +101,13 @@ jobs:
           zip -r ../../compiled.zip .
           cd ../..
           
-          COMPILED_URL=$(curl -X POST \
+          curl -X POST \
             "${{ secrets.SUPABASE_URL }}/storage/v1/object/flutter-compiled/${{ github.event.client_payload.project_id }}/app.zip" \
             -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
             -H "Content-Type: application/zip" \
             --data-binary @compiled.zip \
-            --fail \
-            -w "\n%{http_code}" | tail -1)
+            --fail
           
-          echo "Upload response code: $COMPILED_URL"
           echo "COMPILED_URL=${{ secrets.SUPABASE_URL }}/storage/v1/object/public/flutter-compiled/${{ github.event.client_payload.project_id }}/app.zip" >> $GITHUB_ENV
 
       - name: Notify completion
