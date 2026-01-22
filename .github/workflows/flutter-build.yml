@@ -1,3 +1,4 @@
+# .github/workflows/flutter-build.yml
 name: Flutter Web Build
 
 on:
@@ -15,87 +16,78 @@ jobs:
           flutter-version: '3.24.0'
           channel: 'stable'
 
+      - name: Get build parameters
+        id: params
+        run: |
+          echo "project_id=${{ github.event.client_payload.project_id }}" >> $GITHUB_OUTPUT
+          echo "source_url=${{ github.event.client_payload.source_url }}" >> $GITHUB_OUTPUT
+          echo "callback_url=${{ github.event.client_payload.callback_url }}" >> $GITHUB_OUTPUT
+
       - name: Download and extract source
         run: |
-          SOURCE_URL="${{ github.event.client_payload.source_url }}"
+          SOURCE_URL="${{ steps.params.outputs.source_url }}"
           
-          # Convert GitHub repo URL to ZIP download URL if needed
-          if [[ "$SOURCE_URL" == https://github.com/* && ! "$SOURCE_URL" == *.zip ]]; then
-            REPO_PATH="${SOURCE_URL#https://github.com/}"
-            SOURCE_URL="https://github.com/${REPO_PATH}/archive/refs/heads/main.zip"
+          # Convert GitHub repo URL to ZIP if needed
+          if [[ "$SOURCE_URL" =~ github\.com/([^/]+)/([^/]+)$ ]]; then
+            OWNER="${BASH_REMATCH[1]}"
+            REPO="${BASH_REMATCH[2]%.git}"
+            SOURCE_URL="https://github.com/$OWNER/$REPO/archive/refs/heads/main.zip"
           fi
           
           curl -L -o source.zip "$SOURCE_URL"
-          unzip source.zip -d source_temp
+          unzip source.zip -d extracted
           
-          # Flatten: move contents up if there's a single wrapper directory
+          # Flatten if needed
           shopt -s dotglob
-          if [ $(ls -1 source_temp | wc -l) -eq 1 ] && [ -d "source_temp/$(ls source_temp)" ]; then
-            mv source_temp/*/* ./flutter_project/ 2>/dev/null || mv source_temp/*/.* ./flutter_project/ 2>/dev/null || true
-            mkdir -p flutter_project
-            mv source_temp/*/* flutter_project/ 2>/dev/null || true
-          else
-            mv source_temp flutter_project
+          if [ $(ls -1 extracted | wc -l) -eq 1 ] && [ -d "extracted/$(ls extracted)" ]; then
+            mv extracted/*/* extracted/ 2>/dev/null || true
+            rmdir extracted/*/ 2>/dev/null || true
           fi
           
-          rm -rf source_temp source.zip
+          mv extracted flutter_project
 
-      - name: Generate web support if missing
+      - name: Setup web support
         working-directory: flutter_project
         run: |
           if [ ! -f "web/index.html" ]; then
-            # Extract package name from pubspec.yaml
-            PACKAGE_NAME=$(grep "^name:" pubspec.yaml | sed 's/name: *//' | tr -d '\r\n' | xargs)
-            flutter create --platforms=web --project-name="$PACKAGE_NAME" .
+            PACKAGE_NAME=$(grep "^name:" pubspec.yaml | sed 's/name: *//')
+            flutter create --template=app --platforms=web --project-name="$PACKAGE_NAME" .
           fi
 
-      - name: Install dependencies
+      - name: Build Flutter Web
         working-directory: flutter_project
-        run: flutter pub get
-
-      - name: Build for web
-        working-directory: flutter_project
-        run: flutter build web --release --base-href "/${{ github.event.client_payload.project_id }}/"
-
-      - name: Upload to Supabase Storage
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          PROJECT_ID: ${{ github.event.client_payload.project_id }}
         run: |
+          flutter pub get
+          flutter build web --release --base-href "/${{ steps.params.outputs.project_id }}/"
+
+      - name: Upload to Lovable Cloud
+        run: |
+          PROJECT_ID="${{ steps.params.outputs.project_id }}"
+          CALLBACK_URL="${{ steps.params.outputs.callback_url }}"
+          
           cd flutter_project/build/web
           
-          # Upload each file to Supabase Storage
+          # Create multipart form with all files
+          CURL_ARGS=(-X POST "$CALLBACK_URL")
+          CURL_ARGS+=(-F "project_id=$PROJECT_ID")
+          CURL_ARGS+=(-F "status=completed")
+          
+          # Add all files
           find . -type f | while read file; do
-            relative_path="${file#./}"
-            mime_type=$(file -b --mime-type "$file")
-            
-            echo "Uploading: $relative_path ($mime_type)"
-            
-            curl -X POST "${SUPABASE_URL}/storage/v1/object/flutter-compiled/${PROJECT_ID}/${relative_path}" \
-              -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
-              -H "Content-Type: ${mime_type}" \
-              --data-binary @"$file" \
-              --fail --silent --show-error
+            FILENAME="${file#./}"
+            CURL_ARGS+=(-F "file_$FILENAME=@$file;filename=$FILENAME")
           done
           
-          echo "All files uploaded successfully"
-
-      - name: Notify build success
-        if: success()
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          PROJECT_ID: ${{ github.event.client_payload.project_id }}
-        run: |
-          COMPILED_URL="${SUPABASE_URL}/storage/v1/object/public/flutter-compiled/${PROJECT_ID}/index.html"
+          # Execute upload
+          find . -type f -exec echo "Uploading: {}" \;
           
-          curl -X POST "${{ github.event.client_payload.callback_url }}" \
-            -H "Content-Type: application/json" \
-            -d "{\"project_id\": \"${PROJECT_ID}\", \"status\": \"completed\", \"compiled_url\": \"${COMPILED_URL}\"}"
+          curl "${CURL_ARGS[@]}" \
+            -H "Content-Type: multipart/form-data"
 
-      - name: Notify build failure
+      - name: Report failure
         if: failure()
         run: |
-          curl -X POST "${{ github.event.client_payload.callback_url }}" \
-            -H "Content-Type: application/json" \
-            -d "{\"project_id\": \"${{ github.event.client_payload.project_id }}\", \"status\": \"failed\", \"error_message\": \"Build failed - check GitHub Actions logs\"}"
+          curl -X POST "${{ steps.params.outputs.callback_url }}" \
+            -F "project_id=${{ steps.params.outputs.project_id }}" \
+            -F "status=failed" \
+            -F "error_message=Build failed in GitHub Actions"
