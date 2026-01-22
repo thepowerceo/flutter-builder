@@ -12,7 +12,6 @@ jobs:
         run: |
           curl -L "${{ github.event.client_payload.source_url }}" -o source.zip
           unzip source.zip -d flutter_app
-          cd flutter_app && ls -la
 
       - uses: subosito/flutter-action@v2
         with:
@@ -21,29 +20,24 @@ jobs:
 
       - name: Build web
         run: |
-          cd flutter_app/*  # Enter the extracted folder
+          cd flutter_app/*
           flutter pub get
           flutter build web --release
+          cd build/web && zip -r ../../../build.zip .
 
-      - name: Upload to Supabase Storage
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: |
-          # Zip the build output
-          cd flutter_app/*/build/web
-          zip -r build.zip .
-          
-          # Upload to Supabase storage
-          curl -X POST "$SUPABASE_URL/storage/v1/object/compiled/${{ github.event.client_payload.project_id }}/web.zip" \
-            -H "Authorization: Bearer $SUPABASE_KEY" \
-            -H "Content-Type: application/zip" \
-            --data-binary @build.zip
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flutter-web-build
+          path: build.zip
+          retention-days: 1
 
-      - name: Notify callback
+      - name: Notify callback with artifact URL
         if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          STATUS="${{ job.status }}"
+          ARTIFACT_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           curl -X POST "${{ github.event.client_payload.callback_url }}" \
             -H "Content-Type: application/json" \
-            -d "{\"project_id\":\"${{ github.event.client_payload.project_id }}\",\"status\":\"$STATUS\",\"compiled_url\":\"${{ secrets.SUPABASE_URL }}/storage/v1/object/public/compiled/${{ github.event.client_payload.project_id }}/web.zip\"}"
+            -d '{"project_id":"${{ github.event.client_payload.project_id }}","status":"${{ job.status }}","artifact_url":"'"$ARTIFACT_URL"'"}'
