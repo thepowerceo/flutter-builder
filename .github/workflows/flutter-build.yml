@@ -7,45 +7,67 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    
     steps:
-      - name: Download source
-        run: |
-          REPO_URL="${{ github.event.client_payload.source_url }}"
-          ARCHIVE_URL="${REPO_URL}/archive/refs/heads/main.zip"
-          echo "Downloading from: $ARCHIVE_URL"
-          curl -L "$ARCHIVE_URL" -o source.zip
-          unzip source.zip -d flutter_app
-          ls -la flutter_app/
+    - name: Setup Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: '3.24.0'
+        channel: 'stable'
 
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.24.0'
-          channel: 'stable'
+    - name: Download source
+      if: github.event.client_payload.source_type == 'github'
+      run: |
+        REPO_URL="${{ github.event.client_payload.source_url }}"
+        ARCHIVE_URL="${REPO_URL}/archive/refs/heads/main.zip"
+        echo "Downloading from: $ARCHIVE_URL"
+        curl -L -o source.zip "$ARCHIVE_URL"
+        unzip -q source.zip
+        EXTRACTED_DIR=$(find . -maxdepth 1 -type d -name "*-main" -o -name "*-master" | head -1)
+        if [ -n "$EXTRACTED_DIR" ]; then
+          mv "$EXTRACTED_DIR"/* .
+          rm -rf "$EXTRACTED_DIR"
+        fi
 
-      - name: Build web
-        run: |
-          cd flutter_app/*
-          flutter pub get
-          flutter build web --release
-          cd build/web && zip -r ../../../build.zip .
+    - name: Download from storage
+      if: github.event.client_payload.source_type == 'zip'
+      run: |
+        curl -L -o source.zip "${{ github.event.client_payload.storage_url }}"
+        unzip -q source.zip
+        EXTRACTED_DIR=$(find . -maxdepth 1 -type d ! -name "." | head -1)
+        if [ -n "$EXTRACTED_DIR" ]; then
+          mv "$EXTRACTED_DIR"/* .
+          rm -rf "$EXTRACTED_DIR"
+        fi
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: flutter-web-build
-          path: build.zip
-          retention-days: 1
+    - name: Build web
+      run: |
+        flutter config --no-analytics
+        flutter pub get
+        flutter build web --release
 
-      - name: Notify callback
-        if: always()
-        run: |
-          if [ "${{ job.status }}" == "success" ]; then
-            ARTIFACT_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-            curl -X POST "${{ github.event.client_payload.callback_url }}" \
-              -H "Content-Type: application/json" \
-              -d '{"project_id":"${{ github.event.client_payload.project_id }}","status":"completed","compiled_url":"'"$ARTIFACT_URL"'"}'
-          else
-            curl -X POST "${{ github.event.client_payload.callback_url }}" \
-              -H "Content-Type: application/json" \
-              -d '{"project_id":"${{ github.event.client_payload.project_id }}","status":"failed","error_message":"Build failed - check GitHub Actions logs"}'
-          fi
+    - name: Zip build output
+      run: |
+        cd build/web
+        zip -r ../../flutter-web-build.zip .
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: flutter-web-build
+        path: flutter-web-build.zip
+
+    - name: Notify callback
+      if: always()
+      run: |
+        if [ "${{ job.status }}" == "success" ]; then
+          STATUS="completed"
+          ARTIFACT_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          curl -X POST "${{ github.event.client_payload.callback_url }}" \
+            -H "Content-Type: application/json" \
+            -d '{"project_id":"${{ github.event.client_payload.project_id }}","status":"'"$STATUS"'","compiled_url":"'"$ARTIFACT_URL"'"}'
+        else
+          curl -X POST "${{ github.event.client_payload.callback_url }}" \
+            -H "Content-Type: application/json" \
+            -d '{"project_id":"${{ github.event.client_payload.project_id }}","status":"failed","error_message":"Build failed"}'
+        fi
